@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "srlinux.vpn",
+  "name": "VPN",
+  "version": "1.0.0",
+  "author": "Leandro Barbosa (srlinux)",
+  "license": "MIT",
+  "description": "Import .ovpn profiles and connect/disconnect OpenVPN VPNs from the bar via NetworkManager.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "VPN",
+    "description": "Import an .ovpn profile and connect/disconnect OpenVPN VPNs",
+    "category": "Network",
+    "aliases": ["openvpn", "ovpn"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
