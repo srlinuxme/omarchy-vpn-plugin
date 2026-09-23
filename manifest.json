@@ -4,8 +4,9 @@
   "name": "VPN",
   "version": "1.2.0",
   "author": "Leandro Barbosa (srlinux)",
+  "authorUrl": "https://srlinux.me",
   "license": "MIT",
-  "homepage": "https://srlinux.me",
+  "homepage": "https://github.com/srlinuxme/omarchy-vpn-plugin",
   "repository": "https://github.com/srlinuxme/omarchy-vpn-plugin",
   "description": "Import .ovpn profiles and connect/disconnect OpenVPN VPNs from the bar via NetworkManager.",
   "kinds": [
