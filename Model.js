@@ -195,6 +195,19 @@ var secretClearScript =
   " if [ ! -x \"$ST\" ]; then exit 0; fi;" +
   " \"$ST\" clear service " + SECRET_SERVICE_ATTR + " uuid \"$1\" >/dev/null 2>&1 || true"
 
+// Split tunnel, applied right after an import when the panel's toggle is on.
+// NetworkManager's .ovpn importer drops `pull-filter ignore "redirect-gateway"`,
+// so an imported profile would otherwise make the VPN the default route
+// and send all traffic through it. never-default keeps only the routes the
+// profile/server define on the VPN; ignore-auto-dns keeps the server's
+// pushed DNS from taking over name resolution. Arguments: $1 = uuid.
+var splitTunnelScript =
+  "NMCLI=/usr/bin/nmcli;" +
+  " if [ ! -x \"$NMCLI\" ]; then exit 127; fi;" +
+  " \"$NMCLI\" connection modify \"$1\"" +
+  " ipv4.never-default yes ipv4.ignore-auto-dns yes" +
+  " ipv6.never-default yes ipv6.ignore-auto-dns yes"
+
 function pickFilePath(stdout) {
   var lines = String(stdout || "\n").split(/\r?\n/).filter(function(l) { return l !== "" })
   return lines.length > 0 ? lines[0] : ""
@@ -336,6 +349,7 @@ if (typeof module !== "undefined") {
     secretLookupScript: secretLookupScript,
     secretStoreScript: secretStoreScript,
     secretClearScript: secretClearScript,
+    splitTunnelScript: splitTunnelScript,
     statsScript: statsScript,
     parseVpnStatsBlocks: parseVpnStatsBlocks,
     updateVpnStats: updateVpnStats,

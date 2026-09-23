@@ -48,6 +48,18 @@ Panel {
   // ---- import flow --------------------------------------------------
   property bool importing: false
   property string importError: ""
+
+  // "Split tunnel on import": persisted in this widget's bar entry
+  // (shell.json) so it survives shell restarts. On by default.
+  readonly property bool splitTunnelOnImport: setting("splitTunnelOnImport", true) !== false
+
+  function setSplitTunnelOnImport(value) {
+    if (!root.bar || !root.bar.shell || typeof root.bar.shell.updateEntryInline !== "function") return
+    var entry = { id: root.moduleName }
+    for (var key in settings) if (key !== "id") entry[key] = settings[key]
+    entry.splitTunnelOnImport = !!value
+    root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
   property string flashText: ""
 
   // ---- live per-connection stats (IP, gateway, rx/tx rates) ------------
@@ -58,6 +70,7 @@ Panel {
 
   function close() {
     root.controller.hide()
+    importOptionsOpen = false
     cancelCredentials()
   }
 
@@ -89,8 +102,13 @@ Panel {
     statsProc.running = true
   }
 
+  // Clicking "Import .ovpn" first opens the import options (split tunnel);
+  // "Choose file" there starts the actual file picker.
+  property bool importOptionsOpen: false
+
   function startImport() {
     if (pickFileProc.running || importing) return
+    importOptionsOpen = false
     importError = ""
     pickFileProc.running = true
   }
@@ -252,11 +270,12 @@ Panel {
   // passes through.
   readonly property var safeEnv: ({ "PATH": "/usr/bin", "HOME": Quickshell.env("HOME") || "/root" })
 
-  // The keyring processes (secret-tool) talk to gnome-keyring over the
-  // session D-Bus, so they additionally need the bus address — without it
-  // secret-tool tries to autolaunch D-Bus via X11 and silently fails.
+  // Processes that talk to the session D-Bus — secret-tool (gnome-keyring)
+  // and omarchy-file-select (the desktop file-chooser portal) — also need
+  // the bus address. Without it they try to autolaunch D-Bus via X11 and
+  // fail immediately.
   readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
-  readonly property var secretEnv: ({
+  readonly property var sessionEnv: ({
     "PATH": "/usr/bin",
     "HOME": Quickshell.env("HOME") || "/root",
     "XDG_RUNTIME_DIR": runtimeDir,
@@ -292,14 +311,17 @@ Panel {
   Process {
     id: pickFileProc
     clearEnvironment: true
-    environment: root.safeEnv
+    environment: root.sessionEnv
     command: ["/usr/bin/omarchy-file-select", "--title", "Import VPN profile (.ovpn)", "--extensions", "ovpn"]
     stdout: StdioCollector {
       id: pickFileStdout
       waitForEnd: true
     }
+    stderr: StdioCollector { id: pickFileStderr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode === 0) root.importFile(Model.pickFilePath(pickFileStdout.text))
+      else if (exitCode !== 1) root.importError = "Could not open the file chooser: "
+        + Model.elideStatus(pickFileStderr.text || ("exit " + exitCode))
     }
   }
 
@@ -314,10 +336,33 @@ Panel {
       root.importing = false
       var result = Model.parseImportResult(importStdout.text, importStderr.text)
       if (result.ok) {
-        root.showFlash("Imported \u201c" + result.name + "\u201d")
+        if (root.splitTunnelOnImport) {
+          splitTunnelProc.targetName = result.name
+          splitTunnelProc.command = ["/usr/bin/bash", "-c", Model.splitTunnelScript, "vpn-split-tunnel", result.uuid]
+          splitTunnelProc.running = true
+        } else {
+          root.showFlash("Imported \u201c" + result.name + "\u201d")
+        }
         root.refresh()
       } else {
         root.importError = result.error
+      }
+    }
+  }
+
+  Process {
+    id: splitTunnelProc
+    property string targetName: ""
+    clearEnvironment: true
+    environment: root.safeEnv
+    command: []
+    stderr: StdioCollector { id: splitTunnelStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        root.showFlash("Imported \u201c" + splitTunnelProc.targetName + "\u201d (split tunnel)")
+      } else {
+        root.importError = "Imported \u201c" + splitTunnelProc.targetName + "\u201d, but split tunnel failed: "
+          + Model.elideStatus(splitTunnelStderr.text || "nmcli error")
       }
     }
   }
@@ -345,7 +390,7 @@ Panel {
     id: secretLookupProc
     property string targetUuid: ""
     clearEnvironment: true
-    environment: root.secretEnv
+    environment: root.sessionEnv
     command: []
     stdout: StdioCollector { id: secretLookupStdout; waitForEnd: true }
     onExited: function(exitCode) {
@@ -370,7 +415,7 @@ Panel {
     id: secretStoreProc
     stdinEnabled: true
     clearEnvironment: true
-    environment: root.secretEnv
+    environment: root.sessionEnv
     command: []
     property string secret: ""
     onStarted: {
@@ -385,7 +430,7 @@ Panel {
   Process {
     id: secretClearProc
     clearEnvironment: true
-    environment: root.secretEnv
+    environment: root.sessionEnv
     command: []
   }
 
@@ -590,8 +635,8 @@ Panel {
             fontSize: Style.font.bodySmall
             horizontalPadding: Style.space(10)
             verticalPadding: Style.space(5)
-            enabled: !root.importing
-            onClicked: root.startImport()
+            enabled: !root.importing && !pickFileProc.running
+            onClicked: { root.importError = ""; root.importOptionsOpen = !root.importOptionsOpen }
           }
 
           Column {
@@ -631,6 +676,67 @@ Panel {
               font.letterSpacing: 1.2
               elide: Text.ElideRight
             }
+          }
+        }
+
+        // Import options, shown after clicking "Import .ovpn".
+        Row {
+          visible: importBtn.visible && root.importOptionsOpen
+          width: parent.width
+          spacing: Style.space(8)
+
+          ToggleSwitch {
+            id: splitTunnelSwitch
+            anchors.verticalCenter: parent.verticalCenter
+            checked: root.splitTunnelOnImport
+            foreground: root.fg
+            accent: Color.accent
+            onToggled: root.setSplitTunnelOnImport(!root.splitTunnelOnImport)
+
+            PanelToolTip {
+              visible: splitTunnelSwitch.containsMouse
+              text: "Only the profile's routes use the VPN; internet and DNS stay on your network"
+              fontFamily: root.fontFamily
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Split tunnel on import"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.setSplitTunnelOnImport(!root.splitTunnelOnImport)
+            }
+          }
+        }
+
+        Row {
+          visible: importBtn.visible && root.importOptionsOpen
+          spacing: Style.space(8)
+
+          Button {
+            text: "Choose file\u2026"
+            bordered: true
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            horizontalPadding: Style.space(10)
+            verticalPadding: Style.space(5)
+            onClicked: root.startImport()
+          }
+
+          Button {
+            text: "Cancel"
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            horizontalPadding: Style.space(10)
+            verticalPadding: Style.space(5)
+            onClicked: root.importOptionsOpen = false
           }
         }
 
