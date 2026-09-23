@@ -153,6 +153,48 @@ var credentialConnectScript =
   " printf 'vpn.secrets.password:%s\\n' \"$pw\" > \"$pf\";" +
   " \"$NMCLI\" connection up \"$1\" passwd-file \"$pf\""
 
+// ---- saved-password keyring integration (libsecret / gnome-keyring) ------
+//
+// Secrets are stored through secret-tool (part of libsecret), which talks to
+// whatever Secret Service provider owns the user's session (gnome-keyring
+// here). Every script below resolves secret-tool by absolute path only and
+// fails closed (non-zero exit) if it's missing, same discipline as the
+// credential-connect path. Entries are tagged with a fixed "service"
+// attribute plus the connection's uuid, never its name, so a renamed
+// profile still finds its stored password and nothing but this plugin's
+// own entries are ever touched.
+var SECRET_SERVICE_ATTR = "omarchy-vpn"
+
+// Looks a stored password up by uuid. Prints the bare password to stdout
+// and exits 0 when found; exits non-zero with empty stdout when there is
+// none (unknown uuid, never stored, or user cleared it), so the QML side
+// can silently fall through to the manual prompt instead of treating this
+// as an error.
+var secretLookupScript =
+  "ST=/usr/bin/secret-tool;" +
+  " if [ ! -x \"$ST\" ]; then exit 127; fi;" +
+  " \"$ST\" lookup service " + SECRET_SERVICE_ATTR + " uuid \"$1\""
+
+// Stores (or overwrites) the password for a uuid. The secret arrives on
+// stdin exactly like credentialConnectScript's password does — never argv,
+// never a file this script leaves behind — and is handed straight to
+// secret-tool's own stdin, which is the interface it expects for a
+// non-interactive store.
+var secretStoreScript =
+  "set -e; ST=/usr/bin/secret-tool;" +
+  " if [ ! -x \"$ST\" ]; then exit 127; fi;" +
+  " IFS= read -r pw;" +
+  " printf '%s' \"$pw\" | \"$ST\" store --label=\"$2\" service " + SECRET_SERVICE_ATTR + " uuid \"$1\""
+
+// Best-effort removal of a stored secret (profile removed, or a stored
+// password turned out to be stale/wrong). Never fails the caller: if
+// secret-tool is missing or there was nothing stored, this still exits 0
+// so cleanup never blocks the action that triggered it.
+var secretClearScript =
+  "ST=/usr/bin/secret-tool;" +
+  " if [ ! -x \"$ST\" ]; then exit 0; fi;" +
+  " \"$ST\" clear service " + SECRET_SERVICE_ATTR + " uuid \"$1\" >/dev/null 2>&1 || true"
+
 function pickFilePath(stdout) {
   var lines = String(stdout || "\n").split(/\r?\n/).filter(function(l) { return l !== "" })
   return lines.length > 0 ? lines[0] : ""
@@ -291,6 +333,9 @@ if (typeof module !== "undefined") {
     pickFilePath: pickFilePath,
     probeScript: probeScript,
     credentialConnectScript: credentialConnectScript,
+    secretLookupScript: secretLookupScript,
+    secretStoreScript: secretStoreScript,
+    secretClearScript: secretClearScript,
     statsScript: statsScript,
     parseVpnStatsBlocks: parseVpnStatsBlocks,
     updateVpnStats: updateVpnStats,

@@ -42,6 +42,8 @@ Panel {
   property string usernameText: ""
   property string passwordText: ""
   property bool credentialsIsRetry: false
+  property bool rememberPassword: true
+  property string pendingUsername: ""
 
   // ---- import flow --------------------------------------------------
   property bool importing: false
@@ -118,13 +120,45 @@ Panel {
     busyUuid = ""
     busyKind = ""
     if (Model.needsCredentials(vpnData)) {
-      credentialsUuid = uuid
-      usernameText = userName
-      passwordText = ""
-      credentialsIsRetry = false
+      pendingUsername = userName
+      busyUuid = uuid
+      busyKind = "probe"
+      secretLookupProc.targetUuid = uuid
+      secretLookupProc.command = ["/usr/bin/bash", "-c", Model.secretLookupScript, "vpn-secret-lookup", uuid]
+      secretLookupProc.running = true
     } else {
       connectDirect(uuid)
     }
+  }
+
+  function vpnName(uuid) {
+    for (var i = 0; i < vpns.length; i++) if (vpns[i].uuid === uuid) return vpns[i].name
+    return "VPN"
+  }
+
+  // A stored password came back from the keyring for this uuid: connect
+  // with it straight away, no prompt. If it turns out to be stale (profile
+  // password changed on the server side) credConnectProc's failure handler
+  // clears it and falls back to the manual prompt.
+  function connectWithSavedSecret(uuid, user, secret) {
+    busyUuid = uuid
+    busyKind = "connect"
+    credConnectProc.targetUuid = uuid
+    credConnectProc.targetUser = user
+    credConnectProc.secret = secret
+    credConnectProc.secretForStore = ""
+    credConnectProc.fromKeyring = true
+    credConnectProc.command = ["/usr/bin/bash", "-c", Model.credentialConnectScript, "vpn-connect", uuid, user]
+    credConnectProc.running = true
+  }
+
+  function openManualCredentialPrompt(uuid, user, retry) {
+    busyUuid = ""
+    busyKind = ""
+    credentialsUuid = uuid
+    usernameText = user
+    passwordText = ""
+    credentialsIsRetry = !!retry
   }
 
   function connectDirect(uuid) {
@@ -142,7 +176,10 @@ Panel {
     busyUuid = uuid
     busyKind = "connect"
     credConnectProc.targetUuid = uuid
+    credConnectProc.targetUser = user
     credConnectProc.secret = passwordText
+    credConnectProc.secretForStore = passwordText
+    credConnectProc.fromKeyring = false
     credConnectProc.command = ["/usr/bin/bash", "-c", Model.credentialConnectScript, "vpn-connect", uuid, user]
     credConnectProc.running = true
   }
@@ -163,6 +200,8 @@ Panel {
     removeProc.targetUuid = vpn.uuid
     removeProc.command = ["/usr/bin/nmcli", "connection", "delete", vpn.uuid]
     removeProc.running = true
+    secretClearProc.command = ["/usr/bin/bash", "-c", Model.secretClearScript, "vpn-secret-clear", vpn.uuid]
+    secretClearProc.running = true
   }
 
   onOpenedChanged: if (opened) { refresh(); refreshStats() }
@@ -212,6 +251,17 @@ Panel {
   // on credConnectProc, which is the one process a VPN password ever
   // passes through.
   readonly property var safeEnv: ({ "PATH": "/usr/bin", "HOME": Quickshell.env("HOME") || "/root" })
+
+  // The keyring processes (secret-tool) talk to gnome-keyring over the
+  // session D-Bus, so they additionally need the bus address — without it
+  // secret-tool tries to autolaunch D-Bus via X11 and silently fails.
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
+  readonly property var secretEnv: ({
+    "PATH": "/usr/bin",
+    "HOME": Quickshell.env("HOME") || "/root",
+    "XDG_RUNTIME_DIR": runtimeDir,
+    "DBUS_SESSION_BUS_ADDRESS": Quickshell.env("DBUS_SESSION_BUS_ADDRESS") || ("unix:path=" + runtimeDir + "/bus")
+  })
 
   Process {
     id: listProc
@@ -287,6 +337,58 @@ Panel {
     }
   }
 
+  // Looks up a previously-saved password for this uuid before falling back
+  // to the manual prompt. A miss (unknown uuid / secret-tool absent / user
+  // never saved one) is a normal, silent outcome — not an error — so the
+  // exit path always resumes the connect flow one way or the other.
+  Process {
+    id: secretLookupProc
+    property string targetUuid: ""
+    clearEnvironment: true
+    environment: root.secretEnv
+    command: []
+    stdout: StdioCollector { id: secretLookupStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      var uuid = secretLookupProc.targetUuid
+      var user = root.pendingUsername
+      if (exitCode === 0) {
+        var secret = String(secretLookupStdout.text || "").replace(/\n$/, "")
+        if (secret.length > 0) {
+          root.connectWithSavedSecret(uuid, user, secret)
+          return
+        }
+      }
+      root.openManualCredentialPrompt(uuid, user, false)
+    }
+  }
+
+  // Saves a password to the keyring after a manual credential submit
+  // succeeds. Fire-and-forget: a failure here (keyring locked, secret-tool
+  // missing) only means the next connect asks again, it never blocks or
+  // reverses the VPN connection that already succeeded.
+  Process {
+    id: secretStoreProc
+    stdinEnabled: true
+    clearEnvironment: true
+    environment: root.secretEnv
+    command: []
+    property string secret: ""
+    onStarted: {
+      write(secret + "\n")
+      secret = ""
+    }
+  }
+
+  // Best-effort removal of a stored secret: profile deleted, or a saved
+  // password turned out stale and credConnectProc is falling back to the
+  // manual prompt. Never surfaces an error to the user either way.
+  Process {
+    id: secretClearProc
+    clearEnvironment: true
+    environment: root.secretEnv
+    command: []
+  }
+
   Process {
     id: connectProc
     property string targetUuid: ""
@@ -321,7 +423,10 @@ Panel {
   Process {
     id: credConnectProc
     property string targetUuid: ""
+    property string targetUser: ""
     property string secret: ""
+    property string secretForStore: ""
+    property bool fromKeyring: false
     stdinEnabled: true
     clearEnvironment: true
     environment: root.safeEnv
@@ -338,15 +443,29 @@ Panel {
       if (exitCode !== 0) {
         root.errorUuid = credConnectProc.targetUuid
         root.errorText = Model.connectFailureMessage(credConnectStderr.text, credConnectStdout.text)
-        // Wrong credentials: reopen the prompt so the user can retry
-        // without re-picking the row.
-        if (Model.connectFailureNeedsCredentials(credConnectStderr.text)) {
+        if (credConnectProc.fromKeyring) {
+          // The saved password no longer works (changed on the server
+          // side, or the entry was corrupt) — drop it and fall back to
+          // asking, instead of silently retrying it forever.
+          secretClearProc.command = ["/usr/bin/bash", "-c", Model.secretClearScript, "vpn-secret-clear", credConnectProc.targetUuid]
+          secretClearProc.running = true
+          root.openManualCredentialPrompt(credConnectProc.targetUuid, credConnectProc.targetUser, true)
+        } else if (Model.connectFailureNeedsCredentials(credConnectStderr.text)) {
+          // Wrong credentials: reopen the prompt so the user can retry
+          // without re-picking the row.
           root.credentialsUuid = credConnectProc.targetUuid
           root.credentialsIsRetry = true
         }
       } else {
         root.errorUuid = ""
         root.errorText = ""
+        if (credConnectProc.secretForStore.length > 0 && root.rememberPassword) {
+          secretStoreProc.secret = credConnectProc.secretForStore
+          secretStoreProc.command = ["/usr/bin/bash", "-c", Model.secretStoreScript, "vpn-secret-store",
+            credConnectProc.targetUuid, root.vpnName(credConnectProc.targetUuid)]
+          secretStoreProc.running = true
+        }
+        credConnectProc.secretForStore = ""
         root.cancelCredentials()
       }
       root.refresh()
@@ -862,7 +981,8 @@ Panel {
       anchors.leftMargin: Style.space(10)
       anchors.rightMargin: Style.space(10)
       anchors.topMargin: Style.space(4)
-      implicitHeight: userField.implicitHeight + Style.space(4) + pwField.implicitHeight + Style.spacing.rowGap
+      implicitHeight: userField.implicitHeight + Style.space(4) + pwField.implicitHeight
+        + Style.space(4) + rememberRow.implicitHeight + Style.spacing.rowGap
       height: implicitHeight
 
       TextField {
@@ -890,8 +1010,8 @@ Panel {
         id: pwField
         anchors.left: parent.left
         anchors.right: connectBtn.left
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: Style.spacing.rowGap / 2
+        anchors.top: userField.bottom
+        anchors.topMargin: Style.space(4)
         anchors.rightMargin: Style.space(6)
         password: true
         placeholderText: row.isCredentialsOpen && root.credentialsIsRetry ? "Wrong password \u2013 try again" : "Password"
@@ -917,6 +1037,41 @@ Panel {
         foreground: root.fg
         fontFamily: root.fontFamily
         onClicked: root.submitCredentials()
+      }
+
+      // "Remember password" — saves the password to the system keyring
+      // (libsecret/gnome-keyring) on a successful connect, so the next
+      // connect for this profile skips this prompt entirely.
+      Row {
+        id: rememberRow
+        anchors.left: parent.left
+        anchors.top: pwField.bottom
+        anchors.topMargin: Style.space(6)
+        spacing: Style.space(8)
+
+        ToggleSwitch {
+          id: rememberSwitch
+          anchors.verticalCenter: parent.verticalCenter
+          checked: root.rememberPassword
+          foreground: root.fg
+          accent: Color.accent
+          onToggled: root.rememberPassword = !root.rememberPassword
+        }
+
+        Text {
+          textFormat: Text.PlainText
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Remember password"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+
+          MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.rememberPassword = !root.rememberPassword
+          }
+        }
       }
     }
   }

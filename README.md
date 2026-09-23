@@ -7,7 +7,7 @@ A first-party-styled OpenVPN widget for the [Omarchy](https://omarchy.org/) stat
 ## Features
 
 - **One-click `.ovpn` import** via NetworkManager (`nmcli connection import type openvpn`) — no manual config editing.
-- **Username/password prompt** inline in the panel for profiles that need `auth-user-pass` credentials; nothing is stored outside NetworkManager's own secret store.
+- **Username/password prompt** inline in the panel for profiles that need `auth-user-pass` credentials; an optional **Remember password** toggle saves it to the system keyring (libsecret / gnome-keyring) so later connects skip the prompt.
 - **Wi-Fi-style on/off toggle** to connect and disconnect each imported profile.
 - **Live connection details** — IP address, gateway, current throughput, and total bytes transferred — in the same layout as Omarchy's built-in Network panel.
 - **Multiple profiles** — import and manage more than one `.ovpn` connection from the same widget.
@@ -73,15 +73,16 @@ nmcli -t -f NAME,TYPE connection show | grep :vpn | cut -d: -f1 | xargs -I{} nmc
 
 ## How it works
 
-The plugin is a thin bar-widget UI over standard `nmcli` calls — no custom daemon, no background service, no credential storage outside NetworkManager:
+The plugin is a thin bar-widget UI over standard `nmcli` calls — no custom daemon, no background service, and the only credential storage is the system keyring, used when you opt in with **Remember password**:
 
 - **Import**: `nmcli connection import type openvpn file <path>`
 - **List/status**: `nmcli -t -f NAME,UUID,TYPE,ACTIVE connection show`
 - **Connect (no stored secret)**: `nmcli connection up <uuid>`; if NetworkManager reports missing secrets, the panel opens an inline credentials form. The password is written over the process's stdin into a mode-600 temporary secrets file created by the connect script itself, then handed to `nmcli` — it is never a shell argument and never appears in `/proc/<pid>/cmdline` or shell history.
+- **Saved password**: with **Remember password** on, a successful connect stores the password with `secret-tool store` (attributes `service omarchy-vpn uuid <uuid>`, password passed on stdin). Before prompting, the panel runs `secret-tool lookup` and connects with the stored password when there is one. A stored password that fails to connect is removed with `secret-tool clear` and the form comes back. Removing a profile also clears its stored password.
 - **Disconnect**: `nmcli connection down <uuid>`
 - **Stats**: device, IP, and gateway from `nmcli -g GENERAL.DEVICES,IP4.ADDRESS,IP4.GATEWAY connection show <uuid>`; throughput sampled from `/sys/class/net/<dev>/statistics/{rx,tx}_bytes` on a 1.5s timer while the panel is open.
 
-Every process the plugin spawns runs with `clearEnvironment: true` and a fixed, minimal `PATH` (`/usr/bin`) instead of inheriting the shell's ambient environment, and every external tool (`nmcli`, `bash`, `mktemp`, `chmod`, `rm`, `omarchy-file-select`) is invoked by absolute path rather than by bare name. The credential-connect script additionally checks that each required binary exists and is executable before it ever reads the password from stdin, and fails closed (non-zero exit, no connection attempt) if one is missing. This closes off `$PATH`-hijacking as a way to intercept the VPN password or substitute the connect operation.
+Every process the plugin spawns runs with `clearEnvironment: true` and a fixed, minimal `PATH` (`/usr/bin`) instead of inheriting the shell's ambient environment, and every external tool (`nmcli`, `bash`, `mktemp`, `chmod`, `rm`, `secret-tool`, `omarchy-file-select`) is invoked by absolute path rather than by bare name. The credential-connect script additionally checks that each required binary exists and is executable before it ever reads the password from stdin, and fails closed (non-zero exit, no connection attempt) if one is missing. This closes off `$PATH`-hijacking as a way to intercept the VPN password or substitute the connect operation. The keyring processes also get `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, which `secret-tool` needs to reach the Secret Service on the session bus.
 
 No telemetry, no network calls beyond what `nmcli`/NetworkManager itself makes to your VPN server.
 
