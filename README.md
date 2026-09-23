@@ -87,6 +87,10 @@ Every process the plugin spawns runs with `clearEnvironment: true` and a fixed, 
 
 No telemetry, no network calls beyond what `nmcli`/NetworkManager itself makes to your VPN server.
 
+## Author
+
+Leandro Barbosa (srlinux) — [srlinux.me](https://srlinux.me)
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
