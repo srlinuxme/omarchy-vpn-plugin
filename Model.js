@@ -116,9 +116,15 @@ function connectFailureMessage(stderr, stdout) {
 // Emitted as "<vpn.data>@@OMARCHY-VPN@@<vpn.user-name>\n" so the QML side
 // can split it back apart; nmcli's own field separator (':') can appear
 // inside vpn.data values (escaped), so we don't reuse it here.
+//
+// Every external tool is referenced by its absolute path rather than a bare
+// name. The QML side additionally runs this with clearEnvironment: true and
+// a fixed PATH, so nothing here is resolved against the shell process's
+// ambient (and therefore spoofable) $PATH.
 var probeScript =
-  "d=$(nmcli -t -e no -g vpn.data connection show \"$1\");" +
-  " u=$(nmcli -t -e no -g vpn.user-name connection show \"$1\");" +
+  "NMCLI=/usr/bin/nmcli;" +
+  " d=$(\"$NMCLI\" -t -e no -g vpn.data connection show \"$1\");" +
+  " u=$(\"$NMCLI\" -t -e no -g vpn.user-name connection show \"$1\");" +
   " printf '%s@@OMARCHY-VPN@@%s\\n' \"$d\" \"$u\""
 
 // Connects a VPN profile that needs a username/password. The password
@@ -127,12 +133,25 @@ var probeScript =
 // creates and removes itself, exactly the shape nmcli's own `passwd-file`
 // option expects. Username is set on the profile first so NetworkManager
 // prompts only for the password.
+//
+// This is the security-sensitive path: every tool is invoked by absolute
+// path (never resolved through $PATH), and the script fails closed with a
+// non-zero exit before the password is ever read if any of them is missing
+// or not executable — a substituted or PATH-hijacked binary can't silently
+// capture the secret. The QML side pairs this with clearEnvironment: true
+// and a fixed, minimal PATH so there is no ambient-environment resolution
+// left to spoof in the first place.
 var credentialConnectScript =
-  "set -e; IFS= read -r pw;" +
-  " nmcli connection modify \"$1\" vpn.user-name \"$2\" >/dev/null;" +
-  " pf=$(mktemp); chmod 600 \"$pf\"; trap 'rm -f \"$pf\"' EXIT;" +
+  "set -e;" +
+  " NMCLI=/usr/bin/nmcli; MKTEMP=/usr/bin/mktemp; CHMOD=/usr/bin/chmod; RM=/usr/bin/rm;" +
+  " for bin in \"$NMCLI\" \"$MKTEMP\" \"$CHMOD\" \"$RM\"; do" +
+  "   if [ ! -x \"$bin\" ]; then printf 'Required tool missing: %s\\n' \"$bin\" >&2; exit 127; fi;" +
+  " done;" +
+  " IFS= read -r pw;" +
+  " \"$NMCLI\" connection modify \"$1\" vpn.user-name \"$2\" >/dev/null;" +
+  " pf=$(\"$MKTEMP\"); \"$CHMOD\" 600 \"$pf\"; trap '\"$RM\" -f \"$pf\"' EXIT;" +
   " printf 'vpn.secrets.password:%s\\n' \"$pw\" > \"$pf\";" +
-  " nmcli connection up \"$1\" passwd-file \"$pf\""
+  " \"$NMCLI\" connection up \"$1\" passwd-file \"$pf\""
 
 function pickFilePath(stdout) {
   var lines = String(stdout || "\n").split(/\r?\n/).filter(function(l) { return l !== "" })
@@ -145,14 +164,21 @@ function pickFilePath(stdout) {
 // NetworkManager attached this profile to); rx/tx come straight from
 // /sys/class/net, same source the built-in Network panel's
 // omarchy-network-status --verbose uses for Wi-Fi/Ethernet.
+//
+// nmcli is invoked by absolute path only (no bare "nmcli" resolved through
+// $PATH); "head -1" and "cat <file>" are replaced with a bash parameter
+// expansion and the `read` builtin respectively, so the whole script needs
+// no external tool beyond nmcli itself. Paired with clearEnvironment: true
+// and a fixed PATH on the QML side.
 var statsScript =
-  "for uuid in \"$@\"; do" +
-  " dev=$(nmcli -t -e no -g GENERAL.DEVICES connection show \"$uuid\" 2>/dev/null | head -1);" +
-  " ip=$(nmcli -t -e no -g IP4.ADDRESS connection show \"$uuid\" 2>/dev/null | head -1);" +
-  " gw=$(nmcli -t -e no -g IP4.GATEWAY connection show \"$uuid\" 2>/dev/null | head -1);" +
+  "NMCLI=/usr/bin/nmcli;" +
+  " for uuid in \"$@\"; do" +
+  " dev=$(\"$NMCLI\" -t -e no -g GENERAL.DEVICES connection show \"$uuid\" 2>/dev/null); dev=${dev%%$'\\n'*};" +
+  " ip=$(\"$NMCLI\" -t -e no -g IP4.ADDRESS connection show \"$uuid\" 2>/dev/null); ip=${ip%%$'\\n'*};" +
+  " gw=$(\"$NMCLI\" -t -e no -g IP4.GATEWAY connection show \"$uuid\" 2>/dev/null); gw=${gw%%$'\\n'*};" +
   " rx=0; tx=0;" +
-  " if [ -n \"$dev\" ] && [ -r \"/sys/class/net/$dev/statistics/rx_bytes\" ]; then rx=$(cat \"/sys/class/net/$dev/statistics/rx_bytes\"); fi;" +
-  " if [ -n \"$dev\" ] && [ -r \"/sys/class/net/$dev/statistics/tx_bytes\" ]; then tx=$(cat \"/sys/class/net/$dev/statistics/tx_bytes\"); fi;" +
+  " if [ -n \"$dev\" ] && [ -r \"/sys/class/net/$dev/statistics/rx_bytes\" ]; then IFS= read -r rx < \"/sys/class/net/$dev/statistics/rx_bytes\"; fi;" +
+  " if [ -n \"$dev\" ] && [ -r \"/sys/class/net/$dev/statistics/tx_bytes\" ]; then IFS= read -r tx < \"/sys/class/net/$dev/statistics/tx_bytes\"; fi;" +
   " printf '@@VPN=%s@@\\ndev=%s\\nip=%s\\ngw=%s\\nrx=%s\\ntx=%s\\n' \"$uuid\" \"$dev\" \"$ip\" \"$gw\" \"$rx\" \"$tx\";" +
   " done"
 

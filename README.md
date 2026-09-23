@@ -31,7 +31,7 @@ A first-party-styled OpenVPN widget for the [Omarchy](https://omarchy.org/) stat
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/srlinux/omarchy-vpn-plugin.git --enable
+omarchy plugin add https://github.com/srlinuxme/omarchy-vpn-plugin.git --enable
 ```
 
 This clones the plugin into `~/.config/omarchy/plugins/srlinux.vpn/`, enables it, and adds its icon to the bar.
@@ -45,7 +45,7 @@ omarchy restart shell
 ### Manual install
 
 ```bash
-git clone https://github.com/srlinux/omarchy-vpn-plugin.git ~/.config/omarchy/plugins/srlinux.vpn
+git clone https://github.com/srlinuxme/omarchy-vpn-plugin.git ~/.config/omarchy/plugins/srlinux.vpn
 omarchy plugin enable srlinux.vpn
 omarchy restart shell
 ```
@@ -80,6 +80,8 @@ The plugin is a thin bar-widget UI over standard `nmcli` calls — no custom dae
 - **Connect (no stored secret)**: `nmcli connection up <uuid>`; if NetworkManager reports missing secrets, the panel opens an inline credentials form. The password is written over the process's stdin into a mode-600 temporary secrets file created by the connect script itself, then handed to `nmcli` — it is never a shell argument and never appears in `/proc/<pid>/cmdline` or shell history.
 - **Disconnect**: `nmcli connection down <uuid>`
 - **Stats**: device, IP, and gateway from `nmcli -g GENERAL.DEVICES,IP4.ADDRESS,IP4.GATEWAY connection show <uuid>`; throughput sampled from `/sys/class/net/<dev>/statistics/{rx,tx}_bytes` on a 1.5s timer while the panel is open.
+
+Every process the plugin spawns runs with `clearEnvironment: true` and a fixed, minimal `PATH` (`/usr/bin`) instead of inheriting the shell's ambient environment, and every external tool (`nmcli`, `bash`, `mktemp`, `chmod`, `rm`, `omarchy-file-select`) is invoked by absolute path rather than by bare name. The credential-connect script additionally checks that each required binary exists and is executable before it ever reads the password from stdin, and fails closed (non-zero exit, no connection attempt) if one is missing. This closes off `$PATH`-hijacking as a way to intercept the VPN password or substitute the connect operation.
 
 No telemetry, no network calls beyond what `nmcli`/NetworkManager itself makes to your VPN server.
 

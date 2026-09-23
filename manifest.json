@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "srlinux.vpn",
   "name": "VPN",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Leandro Barbosa (srlinux)",
   "license": "MIT",
   "description": "Import .ovpn profiles and connect/disconnect OpenVPN VPNs from the bar via NetworkManager.",

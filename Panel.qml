@@ -83,7 +83,7 @@ Panel {
       return
     }
     if (statsProc.running) return
-    statsProc.command = ["bash", "-c", Model.statsScript, "vpn-stats"].concat(uuids)
+    statsProc.command = ["/usr/bin/bash", "-c", Model.statsScript, "vpn-stats"].concat(uuids)
     statsProc.running = true
   }
 
@@ -97,7 +97,7 @@ Panel {
     if (path === "") return
     importing = true
     importError = ""
-    importProc.command = ["nmcli", "connection", "import", "type", "openvpn", "file", path]
+    importProc.command = ["/usr/bin/nmcli", "connection", "import", "type", "openvpn", "file", path]
     importProc.running = true
   }
 
@@ -110,7 +110,7 @@ Panel {
     busyUuid = vpn.uuid
     busyKind = "probe"
     probeProc.targetUuid = vpn.uuid
-    probeProc.command = ["bash", "-c", Model.probeScript, "vpn-probe", vpn.uuid]
+    probeProc.command = ["/usr/bin/bash", "-c", Model.probeScript, "vpn-probe", vpn.uuid]
     probeProc.running = true
   }
 
@@ -131,7 +131,7 @@ Panel {
     busyUuid = uuid
     busyKind = "connect"
     connectProc.targetUuid = uuid
-    connectProc.command = ["nmcli", "connection", "up", uuid]
+    connectProc.command = ["/usr/bin/nmcli", "connection", "up", uuid]
     connectProc.running = true
   }
 
@@ -143,7 +143,7 @@ Panel {
     busyKind = "connect"
     credConnectProc.targetUuid = uuid
     credConnectProc.secret = passwordText
-    credConnectProc.command = ["bash", "-c", Model.credentialConnectScript, "vpn-connect", uuid, user]
+    credConnectProc.command = ["/usr/bin/bash", "-c", Model.credentialConnectScript, "vpn-connect", uuid, user]
     credConnectProc.running = true
   }
 
@@ -152,7 +152,7 @@ Panel {
     busyUuid = vpn.uuid
     busyKind = "disconnect"
     disconnectProc.targetUuid = vpn.uuid
-    disconnectProc.command = ["nmcli", "connection", "down", vpn.uuid]
+    disconnectProc.command = ["/usr/bin/nmcli", "connection", "down", vpn.uuid]
     disconnectProc.running = true
   }
 
@@ -161,7 +161,7 @@ Panel {
     busyUuid = vpn.uuid
     busyKind = "remove"
     removeProc.targetUuid = vpn.uuid
-    removeProc.command = ["nmcli", "connection", "delete", vpn.uuid]
+    removeProc.command = ["/usr/bin/nmcli", "connection", "delete", vpn.uuid]
     removeProc.running = true
   }
 
@@ -203,10 +203,21 @@ Panel {
   }
 
   // ---- processes --------------------------------------------------------
+  //
+  // Every Process below sets clearEnvironment: true and a fixed, minimal
+  // environment (root.safeEnv) instead of inheriting the shell's ambient
+  // $PATH. Combined with the absolute tool paths baked into Model.js's
+  // scripts, this means nothing here resolves an external command by name
+  // through a spoofable search path — relevant everywhere, but especially
+  // on credConnectProc, which is the one process a VPN password ever
+  // passes through.
+  readonly property var safeEnv: ({ "PATH": "/usr/bin", "HOME": Quickshell.env("HOME") || "/root" })
 
   Process {
     id: listProc
-    command: ["nmcli", "-t", "-e", "no", "-f", "NAME,UUID,TYPE,ACTIVE", "connection", "show"]
+    clearEnvironment: true
+    environment: root.safeEnv
+    command: ["/usr/bin/nmcli", "-t", "-e", "no", "-f", "NAME,UUID,TYPE,ACTIVE", "connection", "show"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.vpns = Model.parseVpnList(text)
@@ -215,6 +226,8 @@ Panel {
 
   Process {
     id: statsProc
+    clearEnvironment: true
+    environment: root.safeEnv
     command: []
     stdout: StdioCollector {
       id: statsStdout
@@ -228,7 +241,9 @@ Panel {
 
   Process {
     id: pickFileProc
-    command: ["omarchy-file-select", "--title", "Import VPN profile (.ovpn)", "--extensions", "ovpn"]
+    clearEnvironment: true
+    environment: root.safeEnv
+    command: ["/usr/bin/omarchy-file-select", "--title", "Import VPN profile (.ovpn)", "--extensions", "ovpn"]
     stdout: StdioCollector {
       id: pickFileStdout
       waitForEnd: true
@@ -240,6 +255,8 @@ Panel {
 
   Process {
     id: importProc
+    clearEnvironment: true
+    environment: root.safeEnv
     command: []
     stdout: StdioCollector { id: importStdout; waitForEnd: true }
     stderr: StdioCollector { id: importStderr; waitForEnd: true }
@@ -258,6 +275,8 @@ Panel {
   Process {
     id: probeProc
     property string targetUuid: ""
+    clearEnvironment: true
+    environment: root.safeEnv
     command: []
     stdout: StdioCollector { id: probeStdout; waitForEnd: true }
     onExited: function(exitCode) {
@@ -271,6 +290,8 @@ Panel {
   Process {
     id: connectProc
     property string targetUuid: ""
+    clearEnvironment: true
+    environment: root.safeEnv
     command: []
     stdout: StdioCollector { id: connectStdout; waitForEnd: true }
     stderr: StdioCollector { id: connectStderr; waitForEnd: true }
@@ -293,12 +314,17 @@ Panel {
   // mode-600 temp file created *inside* the script, then straight to
   // nmcli's passwd-file option — it is never an argv value, so it never
   // appears in /proc/<pid>/cmdline. Mirrors the WiFi enterprise-connect
-  // script in the built-in Network panel's Model.js.
+  // script in the built-in Network panel's Model.js. clearEnvironment plus
+  // a fixed PATH here (and the absolute paths inside
+  // Model.credentialConnectScript itself) close off PATH-hijacking as a way
+  // to intercept the secret or swap the connect operation.
   Process {
     id: credConnectProc
     property string targetUuid: ""
     property string secret: ""
     stdinEnabled: true
+    clearEnvironment: true
+    environment: root.safeEnv
     command: []
     stdout: StdioCollector { id: credConnectStdout; waitForEnd: true }
     stderr: StdioCollector { id: credConnectStderr; waitForEnd: true }
@@ -331,6 +357,8 @@ Panel {
   Process {
     id: disconnectProc
     property string targetUuid: ""
+    clearEnvironment: true
+    environment: root.safeEnv
     command: []
     stdout: StdioCollector { id: disconnectStdout; waitForEnd: true }
     stderr: StdioCollector { id: disconnectStderr; waitForEnd: true }
@@ -352,6 +380,8 @@ Panel {
   Process {
     id: removeProc
     property string targetUuid: ""
+    clearEnvironment: true
+    environment: root.safeEnv
     command: []
     stdout: StdioCollector { id: removeStdout; waitForEnd: true }
     stderr: StdioCollector { id: removeStderr; waitForEnd: true }
